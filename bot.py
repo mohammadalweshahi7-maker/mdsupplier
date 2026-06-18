@@ -39,31 +39,31 @@ PRODUCT_LABELS = ["60", "325", "660", "1800", "3850", "8100"]
 
 T = {
     "en": {
-        "welcome": "Welcome to MD Supplier Bot\n\nChoose an option:", "choose_lang": "Choose language:", "lang_saved": "Language updated.", "main": "Main menu:",
-        "shop": "SHOP", "topup_balance": "Top Up Balance", "orders": "My Orders", "cart": "Cart", "account": "Account", "language": "Language", "back": "Back",
-        "pubg_uc": "PUBG UC", "codes": "Codes", "id_topup": "Top-up by ID", "select_product": "Select PUBG UC amount:",
-        "confirm_code": "Confirm code order:\n\nProduct: {amount} UC\nPrice: {price:.2f} USDT", "buy_now": "Buy Now", "add_cart": "Add to Cart",
+        "welcome": "Welcome to MD SUPPLIER BOT\n\nProfessional PUBG UC supply system.\nFast code delivery and PUBG ID top-up service.\n\nUse the buttons below to browse products, recharge your balance, check your orders, or contact support.\n\nChoose an option:", "choose_lang": "Choose language:", "lang_saved": "Language updated.", "main": "Main menu:",
+        "shop": "🛒 SHOP", "topup_balance": "💳 Top Up Balance", "orders": "📦 My Orders", "cart": "🧾 Cart", "account": "👤 Account", "language": "🌐 Language", "support": "🛟 Support", "back": "🔙 Back",
+        "pubg_uc": "🎮 PUBG UC", "codes": "🎟 Codes", "id_topup": "⚡ Top-up by ID", "select_product": "Select PUBG UC amount:",
+        "confirm_code": "Confirm code order:\n\nProduct: {amount} UC\nPrice: {price:.2f} USDT", "buy_now": "✅ Buy Now", "add_cart": "🧾 Add to Cart",
         "insufficient": "Insufficient balance.\nRequired: {price:.2f} USDT\nYour balance: {balance:.2f} USDT",
         "order_done_code": "Order completed successfully.\n\nOrder ID: {order_id}\nProduct: PUBG UC {amount} UC\nCode:\n{code}\n\nStatus: Completed",
         "ask_player_id": "Please send the PUBG Player ID:", "ask_player_name": "Please send the PUBG account name:",
         "order_done_id": "Recharge submitted successfully.\n\nOrder ID: {order_id}\nPlayer ID: {player_id}\nPlayer Name: {player_name}\nPUBG UC Amount: {amount} UC\nDate & Time: {date}\nStatus: Completed\nProof: Recharge submitted successfully",
-        "topup_msg": "USDT BEP20 Deposit Address:\n\n{wallet}\n\nMinimum deposit: {min_deposit:.2f} USDT\n\nAfter payment, contact support or send the transaction hash.",
-        "copy_wallet": "Copy Address", "wallet_copy": "Wallet address:\n{wallet}", "empty_cart": "Your cart is empty.", "cart_added": "Added to cart.",
-        "account_msg": "Account\n\nUser ID: {uid}\nUsername: @{username}\nBalance: {balance:.2f} USDT\nMinimum deposit: {min_deposit:.2f} USDT",
+        "topup_msg": "USDT BEP20 Deposit Address:\n\n{wallet}\n\nAfter payment, please send the transaction hash to support for balance confirmation.",
+        "copy_wallet": "📋 Copy Address", "wallet_copy": "{wallet}", "empty_cart": "Your cart is empty.", "cart_added": "Added to cart.",
+        "account_msg": "Account\n\nUser ID: {uid}\nUsername: @{username}\nBalance: {balance:.2f} USDT",
         "no_orders": "No orders yet.", "banned": "Your account is blocked. Contact support.", "admin_only": "Admin only."
     },
     "ru": {
-        "welcome": "Добро пожаловать в MD Supplier Bot\n\nВыберите действие:", "choose_lang": "Выберите язык:", "lang_saved": "Язык обновлён.", "main": "Главное меню:",
-        "shop": "SHOP", "topup_balance": "Пополнить баланс", "orders": "Мои заказы", "cart": "Корзина", "account": "Аккаунт", "language": "Язык", "back": "Назад",
-        "pubg_uc": "PUBG UC", "codes": "Коды", "id_topup": "Пополнение по ID", "select_product": "Выберите количество PUBG UC:",
-        "confirm_code": "Подтвердите заказ кода:\n\nТовар: {amount} UC\nЦена: {price:.2f} USDT", "buy_now": "Купить сейчас", "add_cart": "Добавить в корзину",
+        "welcome": "Добро пожаловать в MD SUPPLIER BOT\n\nПрофессиональная система поставки PUBG UC.\nБыстрая выдача кодов и пополнение PUBG по ID.\n\nИспользуйте кнопки ниже, чтобы выбрать товар, пополнить баланс, проверить заказы или связаться с поддержкой.\n\nВыберите действие:", "choose_lang": "Выберите язык:", "lang_saved": "Язык обновлён.", "main": "Главное меню:",
+        "shop": "🛒 SHOP", "topup_balance": "💳 Пополнить баланс", "orders": "📦 Мои заказы", "cart": "🧾 Корзина", "account": "👤 Аккаунт", "language": "🌐 Язык", "support": "🛟 Поддержка", "back": "🔙 Назад",
+        "pubg_uc": "🎮 PUBG UC", "codes": "🎟 Коды", "id_topup": "⚡ Пополнение по ID", "select_product": "Выберите количество PUBG UC:",
+        "confirm_code": "Подтвердите заказ кода:\n\nТовар: {amount} UC\nЦена: {price:.2f} USDT", "buy_now": "✅ Купить сейчас", "add_cart": "🧾 Добавить в корзину",
         "insufficient": "Недостаточно баланса.\nНужно: {price:.2f} USDT\nВаш баланс: {balance:.2f} USDT",
         "order_done_code": "Заказ успешно выполнен.\n\nOrder ID: {order_id}\nТовар: PUBG UC {amount} UC\nКод:\n{code}\n\nСтатус: Completed",
         "ask_player_id": "Отправьте PUBG Player ID:", "ask_player_name": "Отправьте никнейм аккаунта PUBG:",
         "order_done_id": "Пополнение успешно отправлено.\n\nOrder ID: {order_id}\nPlayer ID: {player_id}\nPlayer Name: {player_name}\nPUBG UC Amount: {amount} UC\nDate & Time: {date}\nStatus: Completed\nProof: Recharge submitted successfully",
-        "topup_msg": "Адрес для депозита USDT BEP20:\n\n{wallet}\n\nМинимальное пополнение: {min_deposit:.2f} USDT\n\nПосле оплаты свяжитесь с поддержкой или отправьте hash транзакции.",
-        "copy_wallet": "Скопировать адрес", "wallet_copy": "Адрес кошелька:\n{wallet}", "empty_cart": "Корзина пуста.", "cart_added": "Добавлено в корзину.",
-        "account_msg": "Аккаунт\n\nUser ID: {uid}\nUsername: @{username}\nBalance: {balance:.2f} USDT\nМинимальное пополнение: {min_deposit:.2f} USDT",
+        "topup_msg": "Адрес для депозита USDT BEP20:\n\n{wallet}\n\nПосле оплаты отправьте hash транзакции в поддержку для подтверждения баланса.",
+        "copy_wallet": "📋 Скопировать адрес", "wallet_copy": "{wallet}", "empty_cart": "Корзина пуста.", "cart_added": "Добавлено в корзину.",
+        "account_msg": "Аккаунт\n\nUser ID: {uid}\nUsername: @{username}\nBalance: {balance:.2f} USDT",
         "no_orders": "Заказов пока нет.", "banned": "Ваш аккаунт заблокирован. Свяжитесь с поддержкой.", "admin_only": "Только администратор."
     }
 }
@@ -134,13 +134,25 @@ def generate_uc_code(): return random.choice(["jhhqQ", "dwPm5", "SZdRH", "XvRk9"
 
 def main_menu(uid):
     return InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text=tr(uid,"shop"), callback_data="menu:shop"), InlineKeyboardButton(text=tr(uid,"topup_balance"), callback_data="menu:topup")],
+        [InlineKeyboardButton(text=tr(uid,"shop"), callback_data="menu:shop")],
+        [InlineKeyboardButton(text=tr(uid,"topup_balance"), callback_data="menu:topup")],
         [InlineKeyboardButton(text=tr(uid,"orders"), callback_data="menu:orders"), InlineKeyboardButton(text=tr(uid,"cart"), callback_data="menu:cart")],
         [InlineKeyboardButton(text=tr(uid,"account"), callback_data="menu:account"), InlineKeyboardButton(text=tr(uid,"language"), callback_data="menu:language")],
+        [InlineKeyboardButton(text=tr(uid,"support"), url=f"https://t.me/{SUPPORT_USERNAME.replace('@','')}")],
     ])
 def back_menu(uid): return InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text=tr(uid,"back"), callback_data="menu:main")]])
-def shop_menu(uid): return InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text=tr(uid,"pubg_uc"), callback_data="shop:pubg")],[InlineKeyboardButton(text=tr(uid,"back"), callback_data="menu:main")]])
-def pubg_menu(uid): return InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text=tr(uid,"codes"), callback_data="pubg:code")],[InlineKeyboardButton(text=tr(uid,"id_topup"), callback_data="pubg:id")],[InlineKeyboardButton(text=tr(uid,"back"), callback_data="menu:shop")]])
+def shop_menu(uid):
+    return InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text=tr(uid,"pubg_uc"), callback_data="shop:pubg")],
+        [InlineKeyboardButton(text=tr(uid,"support"), url=f"https://t.me/{SUPPORT_USERNAME.replace('@','')}")],
+        [InlineKeyboardButton(text=tr(uid,"back"), callback_data="menu:main")],
+    ])
+def pubg_menu(uid):
+    return InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text=tr(uid,"codes"), callback_data="pubg:code")],
+        [InlineKeyboardButton(text=tr(uid,"id_topup"), callback_data="pubg:id")],
+        [InlineKeyboardButton(text=tr(uid,"back"), callback_data="menu:shop")],
+    ])
 def products_menu(uid, order_type):
     rows = [[InlineKeyboardButton(text=f"{amount} UC - {get_price(order_type, amount):.2f} USDT", callback_data=f"prod:{order_type}:{amount}")] for amount in PRODUCT_LABELS]
     rows.append([InlineKeyboardButton(text=tr(uid,"back"), callback_data="shop:pubg")]); return InlineKeyboardMarkup(inline_keyboard=rows)
