@@ -71,6 +71,8 @@ BYBIT_API_KEY = os.getenv("BYBIT_API_KEY", "").strip()
 BYBIT_API_SECRET = os.getenv("BYBIT_API_SECRET", "").strip()
 BYBIT_BASE_URL = os.getenv("BYBIT_BASE_URL", "https://api.bybit.com").rstrip("/")
 BYBIT_RECV_WINDOW = os.getenv("BYBIT_RECV_WINDOW", "5000")
+BYBIT_DEPOSIT_LOOKBACK_HOURS = int(os.getenv("BYBIT_DEPOSIT_LOOKBACK_HOURS", "24"))
+BYBIT_MATCH_TOLERANCE = float(os.getenv("BYBIT_MATCH_TOLERANCE", "0.01"))
 LOGO_PATH = os.getenv("LOGO_PATH", str(BASE_DIR / "a_clean_high_resolution_dark_gaming_themed_logo.png"))
 
 if not BOT_TOKEN:
@@ -921,14 +923,15 @@ def reserve_uc_codes(amount: str, qty: int, user_id: int) -> List[str]:
 
 # ------------------------- Bybit API -------------------------
 def bybit_sign(query: str, timestamp: str) -> str:
+    """Bybit V5 GET signature: timestamp + api_key + recv_window + query_string."""
     payload = f"{timestamp}{BYBIT_API_KEY}{BYBIT_RECV_WINDOW}{query}"
     return hmac.new(BYBIT_API_SECRET.encode(), payload.encode(), hashlib.sha256).hexdigest()
 
-async def bybit_get_deposits(start_ms: int, end_ms: int) -> List[Dict[str, Any]]:
+async def bybit_signed_get(path: str, params: Dict[str, Any]) -> Dict[str, Any]:
     if not BYBIT_API_KEY or not BYBIT_API_SECRET:
-        return []
-    params = {"coin": "USDT", "startTime": start_ms, "endTime": end_ms, "limit": 50}
-    query = urlencode(params)
+        return {"retCode": -1, "retMsg": "BYBIT_API_KEY or BYBIT_API_SECRET is missing in Railway Variables", "result": {}}
+    clean_params = {k: v for k, v in params.items() if v is not None and v != ""}
+    query = urlencode(clean_params)
     timestamp = str(int(time.time() * 1000))
     headers = {
         "X-BAPI-API-KEY": BYBIT_API_KEY,
@@ -937,27 +940,56 @@ async def bybit_get_deposits(start_ms: int, end_ms: int) -> List[Dict[str, Any]]
         "X-BAPI-RECV-WINDOW": BYBIT_RECV_WINDOW,
         "X-BAPI-SIGN-TYPE": "2",
     }
-    url = f"{BYBIT_BASE_URL}/v5/asset/deposit/query-record?{query}"
+    url = f"{BYBIT_BASE_URL}{path}?{query}" if query else f"{BYBIT_BASE_URL}{path}"
     async with aiohttp.ClientSession() as session:
-        async with session.get(url, headers=headers, timeout=20) as resp:
-            data = await resp.json(content_type=None)
+        async with session.get(url, headers=headers, timeout=25) as resp:
+            try:
+                return await resp.json(content_type=None)
+            except Exception:
+                body = await resp.text()
+                return {"retCode": resp.status, "retMsg": body[:500], "result": {}}
+
+async def bybit_get_deposits(start_ms: int, end_ms: int) -> List[Dict[str, Any]]:
+    """Read Bybit USDT deposit history."""
+    params = {"coin": "USDT", "startTime": start_ms, "endTime": end_ms, "limit": 50}
+    data = await bybit_signed_get("/v5/asset/deposit/query-record", params)
     if str(data.get("retCode")) != "0":
         print("Bybit deposit error:", data)
         return []
     result = data.get("result") or {}
-    return result.get("rows") or []
+    rows = result.get("rows") or result.get("list") or []
+    print(f"Bybit deposits fetched: {len(rows)}")
+    return rows
+
+def _deposit_field(dep: Dict[str, Any], *names: str) -> str:
+    for name in names:
+        value = dep.get(name)
+        if value is not None and str(value).strip():
+            return str(value).strip()
+    return ""
 
 def chain_matches(network: str, chain: str, to_address: str) -> bool:
-    c = (chain or "").upper()
+    c = (chain or "").upper().replace(" ", "")
     addr = (to_address or "").strip().lower()
     if network == "BEP20":
-        return ("BSC" in c or "BEP20" in c or "BSC(BEP20)" in c) and addr == USDT_BEP20_ADDRESS.lower()
+        chain_ok = any(x in c for x in ("BSC", "BEP20", "BSC(BEP20)", "BNBSMARTCHAIN"))
+        # Some Bybit deposit records do not expose toAddress. If absent, accept chain only.
+        address_ok = not addr or addr == USDT_BEP20_ADDRESS.lower()
+        return chain_ok and address_ok
     if network == "TRC20":
-        return ("TRX" in c or "TRC20" in c) and addr == USDT_TRC20_ADDRESS.lower()
+        chain_ok = any(x in c for x in ("TRX", "TRC20", "TRON"))
+        address_ok = not addr or addr == USDT_TRC20_ADDRESS.lower()
+        return chain_ok and address_ok
     return False
 
 def close_amount(a: float, b: float) -> bool:
-    return abs(a - b) <= 0.000001
+    # Small tolerance fixes Bybit rounding/credit display differences.
+    return abs(float(a) - float(b)) <= BYBIT_MATCH_TOLERANCE
+
+def deposit_success(dep: Dict[str, Any]) -> bool:
+    status = str(dep.get("status", "")).strip()
+    # Bybit commonly uses 3 for successful deposits. Keep text fallbacks too.
+    return status in {"3", "SUCCESS", "Success", "success", "1", "COMPLETED", "Completed", "completed"}
 
 async def check_single_invoice(invoice_id: int) -> bool:
     with db() as con:
@@ -975,11 +1007,16 @@ async def match_invoice(inv: sqlite3.Row) -> bool:
             con.execute("UPDATE invoices SET status='expired' WHERE id=? AND status='waiting'", (inv["id"],))
             con.commit()
         return False
-    start_ms = int((created - timedelta(minutes=5)).timestamp() * 1000)
+
+    # Look back at least 24h by default so Railway/server time differences or restarts do not miss the deposit.
+    start = min(created - timedelta(minutes=10), now - timedelta(hours=BYBIT_DEPOSIT_LOOKBACK_HOURS))
+    start_ms = int(start.timestamp() * 1000)
     end_ms = int((now + timedelta(minutes=5)).timestamp() * 1000)
     deposits = await bybit_get_deposits(start_ms, end_ms)
+    print(f"Checking invoice {inv['id']} user={inv['user_id']} amount={inv['amount']} network={inv['network']} deposits={len(deposits)}")
+
     for dep in deposits:
-        txid = dep.get("txID") or dep.get("txId") or ""
+        txid = _deposit_field(dep, "txID", "txId", "txHash", "hash")
         if not txid:
             continue
         with db() as con:
@@ -987,16 +1024,19 @@ async def match_invoice(inv: sqlite3.Row) -> bool:
         if used:
             continue
         try:
-            amount = float(dep.get("amount", "0"))
+            amount = float(_deposit_field(dep, "amount", "qty", "quantity") or "0")
         except ValueError:
             continue
-        # status 3 is Success in Bybit V5 deposit records; some accounts may return string statuses.
-        status = str(dep.get("status", ""))
-        if status not in {"3", "SUCCESS", "Success", "success", "1"}:
+        if not deposit_success(dep):
+            print("Deposit skipped, not success:", {"txid": txid, "status": dep.get("status")})
             continue
         if not close_amount(amount, float(inv["amount"])):
+            print("Deposit skipped, amount mismatch:", {"txid": txid, "dep_amount": amount, "invoice_amount": float(inv["amount"])})
             continue
-        if not chain_matches(inv["network"], dep.get("chain", ""), dep.get("toAddress", "")):
+        chain = _deposit_field(dep, "chain", "network", "chainType")
+        to_addr = _deposit_field(dep, "toAddress", "address", "walletAddress", "depositAddress")
+        if not chain_matches(inv["network"], chain, to_addr):
+            print("Deposit skipped, chain/address mismatch:", {"txid": txid, "chain": chain, "to": to_addr, "invoice_network": inv["network"]})
             continue
         await mark_invoice_paid(inv, txid, amount)
         return True
@@ -1007,7 +1047,10 @@ async def mark_invoice_paid(inv: sqlite3.Row, txid: str, amount: float) -> None:
     network = inv["network"]
     description = f"Payment from {network} Pay"
     with db() as con:
-        con.execute("INSERT OR IGNORE INTO used_bybit_txids(txid, invoice_id, user_id, amount, created_at) VALUES(?,?,?,?,?)", (txid, inv["id"], user_id, amount, now_iso()))
+        already = con.execute("SELECT txid FROM used_bybit_txids WHERE txid=?", (txid,)).fetchone()
+        if already:
+            return
+        con.execute("INSERT INTO used_bybit_txids(txid, invoice_id, user_id, amount, created_at) VALUES(?,?,?,?,?)", (txid, inv["id"], user_id, amount, now_iso()))
         con.execute("UPDATE invoices SET status='paid', txid=? WHERE id=?", (txid, inv["id"]))
         con.commit()
     tx_id, before, after = add_balance(user_id, amount, description, txid)
@@ -1037,6 +1080,8 @@ async def invoice_watcher() -> None:
         try:
             with db() as con:
                 rows = con.execute("SELECT * FROM invoices WHERE status='waiting' ORDER BY id ASC LIMIT 50").fetchall()
+            if rows:
+                print(f"Invoice watcher: {len(rows)} waiting invoices")
             for inv in rows:
                 with suppress(Exception):
                     await match_invoice(inv)
@@ -1344,6 +1389,45 @@ Balance: ${float(user['balance']):.2f}
 Minimum Order: ${get_min_order(uid):.2f}
 Banned: {'Yes' if int(user['banned'] or 0) else 'No'}""")
 
+@dp.message(Command("bybittest"))
+async def admin_bybit_test(message: Message):
+    if not admin_only(message):
+        return
+    end_ms = int(datetime.now(timezone.utc).timestamp() * 1000)
+    start_ms = int((datetime.now(timezone.utc) - timedelta(hours=BYBIT_DEPOSIT_LOOKBACK_HOURS)).timestamp() * 1000)
+    if not BYBIT_API_KEY or not BYBIT_API_SECRET:
+        await message.answer("❌ BYBIT_API_KEY or BYBIT_API_SECRET is missing in Railway Variables.")
+        return
+    rows = await bybit_get_deposits(start_ms, end_ms)
+    text = f"✅ Bybit API connected. Deposits found in last {BYBIT_DEPOSIT_LOOKBACK_HOURS}h: {len(rows)}"
+    if rows:
+        preview = []
+        for dep in rows[:5]:
+            preview.append(
+                f"TXID: <code>{_deposit_field(dep, 'txID', 'txId', 'txHash')[:18]}...</code>\n"
+                f"Amount: {_deposit_field(dep, 'amount', 'qty')} USDT\n"
+                f"Chain: {_deposit_field(dep, 'chain', 'network', 'chainType')}\n"
+                f"Status: {dep.get('status')}"
+            )
+        text += "\n\n" + "\n---\n".join(preview)
+    await message.answer(text)
+
+@dp.message(Command("checkinvoice"))
+async def admin_check_invoice(message: Message):
+    if not admin_only(message):
+        return
+    parts = (message.text or "").split()
+    if len(parts) != 2:
+        await message.answer("Usage: /checkinvoice INVOICE_ID")
+        return
+    try:
+        invoice_id = int(parts[1])
+    except ValueError:
+        await message.answer("Invalid invoice id.")
+        return
+    ok = await check_single_invoice(invoice_id)
+    await message.answer("✅ Invoice paid and balance added." if ok else "❌ Payment not matched yet. Check Railway logs or run /bybittest.")
+
 @dp.message(Command("admin"))
 async def admin_help(message: Message):
     if not admin_only(message):
@@ -1363,7 +1447,9 @@ async def admin_help(message: Message):
 /setprice auto "CATEGORY" PRODUCT_KEY PRICE
 /addcode AMOUNT CODE
 /stock
-/broadcast MESSAGE""")
+/broadcast MESSAGE
+/bybittest
+/checkinvoice INVOICE_ID""")
 
 @dp.message(Command("addcode"))
 async def admin_add_code(message: Message):
