@@ -46,6 +46,7 @@ from aiogram.types import (
     KeyboardButton,
     Message,
     ReplyKeyboardMarkup,
+    TelegramObject,
 )
 from dotenv import load_dotenv
 
