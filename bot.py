@@ -27,11 +27,11 @@ import time
 from contextlib import suppress
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Awaitable, Callable, Dict, List, Optional, Tuple
 from urllib.parse import urlencode
 
 import aiohttp
-from aiogram import Bot, Dispatcher, F
+from aiogram import BaseMiddleware, Bot, Dispatcher, F
 from aiogram.client.default import DefaultBotProperties
 from aiogram.enums import ParseMode
 from aiogram.filters import Command, CommandStart
@@ -165,6 +165,37 @@ CATEGORY_EMOJI = {
     "League of Legends": "🏓",
 }
 
+LANGUAGES = {
+    "ar": "🇸🇦 العربية",
+    "en": "🇬🇧 English",
+    "ru": "🇷🇺 Русский",
+    "my": "🇲🇲 Myanmar",
+}
+
+BUTTONS = {
+    "game_auto": {
+        "en": "🚀 Game ID Recharge (Auto)",
+        "ar": "🚀 شحن ID الألعاب تلقائي",
+        "ru": "🚀 Пополнение Game ID авто",
+        "my": "🚀 Game ID ဖြည့်ရန် (Auto)",
+    },
+    "pubg_code": {"en": "🎮 PUBG UC CODE", "ar": "🎮 أكواد PUBG UC", "ru": "🎮 PUBG UC коды", "my": "🎮 PUBG UC CODE"},
+    "balance": {"en": "💰 My Balance", "ar": "💰 رصيدي", "ru": "💰 Баланс", "my": "💰 My Balance"},
+    "orders": {"en": "📦 My Orders", "ar": "📦 طلباتي", "ru": "📦 Заказы", "my": "📦 My Orders"},
+    "transactions": {"en": "📊 My Transaction", "ar": "📊 معاملاتي", "ru": "📊 Транзакции", "my": "📊 My Transaction"},
+    "manual": {"en": "⚡ Manual Order", "ar": "⚡ طلب يدوي", "ru": "⚡ Ручной заказ", "my": "⚡ Manual Order"},
+    "support": {"en": "☎️ Contact Support", "ar": "☎️ الدعم", "ru": "☎️ Поддержка", "my": "☎️ Contact Support"},
+    "language": {"en": "🌐 Languages", "ar": "🌐 اللغات", "ru": "🌐 Язык", "my": "🌐 Languages"},
+}
+
+BUTTON_ALIASES = {value for group in BUTTONS.values() for value in group.values()}
+BUTTON_BY_KEY = {key: set(group.values()) for key, group in BUTTONS.items()}
+
+PRICE_BASE_RATE = {
+    "auto": 78.0,
+    "code": 81.0,
+}
+
 # ------------------------- FSM -------------------------
 class DepositStates(StatesGroup):
     waiting_amount = State()
@@ -176,6 +207,13 @@ class PurchaseStates(StatesGroup):
 
 class ManualOrderStates(StatesGroup):
     waiting_text = State()
+
+class AdminReplyStates(StatesGroup):
+    waiting_text = State()
+
+class AdminPriceStates(StatesGroup):
+    waiting_percent = State()
+    waiting_price = State()
 
 # ------------------------- Database -------------------------
 def db() -> sqlite3.Connection:
@@ -191,8 +229,11 @@ def init_db() -> None:
             first_name TEXT DEFAULT '',
             balance REAL DEFAULT 0,
             banned INTEGER DEFAULT 0,
+            language TEXT DEFAULT 'en',
             created_at TEXT NOT NULL
         )""")
+        with suppress(sqlite3.OperationalError):
+            con.execute("ALTER TABLE users ADD COLUMN language TEXT DEFAULT 'en'")
         con.execute("""CREATE TABLE IF NOT EXISTS invoices(
             id INTEGER PRIMARY KEY AUTOINCREMENT,
             invoice_code TEXT UNIQUE,
@@ -250,6 +291,14 @@ def init_db() -> None:
             amount REAL,
             created_at TEXT NOT NULL
         )""")
+        con.execute("""CREATE TABLE IF NOT EXISTS product_prices(
+            ptype TEXT NOT NULL,
+            category TEXT NOT NULL,
+            product_key TEXT NOT NULL,
+            price REAL NOT NULL,
+            updated_at TEXT NOT NULL,
+            PRIMARY KEY(ptype, category, product_key)
+        )""")
         con.commit()
 
 def now_iso() -> str:
@@ -277,6 +326,24 @@ def get_user(user_id: int) -> sqlite3.Row:
         con.execute("INSERT INTO users(user_id, created_at) VALUES(?,?)", (user_id, now_iso()))
         con.commit()
         return con.execute("SELECT * FROM users WHERE user_id=?", (user_id,)).fetchone()
+
+def user_language(user_id: int) -> str:
+    try:
+        lang = (get_user(user_id)["language"] or "en").strip()
+    except Exception:
+        lang = "en"
+    return lang if lang in LANGUAGES else "en"
+
+def b(key: str, lang: str) -> str:
+    return BUTTONS[key].get(lang, BUTTONS[key]["en"])
+
+def set_user_language(user_id: int, lang: str) -> None:
+    if lang not in LANGUAGES:
+        return
+    get_user(user_id)
+    with db() as con:
+        con.execute("UPDATE users SET language=? WHERE user_id=?", (lang, user_id))
+        con.commit()
 
 def add_balance(user_id: int, amount: float, description: str, txid: str = "") -> Tuple[int, float, float]:
     with db() as con:
@@ -306,19 +373,59 @@ def deduct_balance(user_id: int, amount: float, description: str) -> Tuple[int, 
         con.commit()
         return cur.lastrowid, before, after
 
+# ------------------------- Price helpers -------------------------
+def _default_product(category: str, key: str, ptype: str) -> Optional[Tuple[str, str, float]]:
+    if ptype == "code":
+        return next((p for p in PUBG_UC_CODE_PRODUCTS if p[0] == key), None)
+    return next((p for p in GAME_CATEGORIES.get(category, []) if p[0] == key), None)
+
+def get_custom_price(ptype: str, category: str, key: str) -> Optional[float]:
+    with db() as con:
+        row = con.execute("SELECT price FROM product_prices WHERE ptype=? AND category=? AND product_key=?", (ptype, category, key)).fetchone()
+    return float(row["price"]) if row else None
+
+def set_custom_price(ptype: str, category: str, key: str, price: float) -> None:
+    with db() as con:
+        con.execute("""INSERT INTO product_prices(ptype, category, product_key, price, updated_at) VALUES(?,?,?,?,?)
+                       ON CONFLICT(ptype, category, product_key) DO UPDATE SET price=excluded.price, updated_at=excluded.updated_at""",
+                    (ptype, category, key, round(price, 2), now_iso()))
+        con.commit()
+
+def priced_products(category: str, ptype: str = "auto") -> List[Tuple[str, str, float]]:
+    source = PUBG_UC_CODE_PRODUCTS if ptype == "code" else GAME_CATEGORIES.get(category, [])
+    result = []
+    for key, name, default_price in source:
+        result.append((key, name, get_custom_price(ptype, category, key) or default_price))
+    return result
+
+def apply_category_percent(ptype: str, category: str, percent: float) -> int:
+    base_rate = PRICE_BASE_RATE.get(ptype, 78.0)
+    count = 0
+    source = PUBG_UC_CODE_PRODUCTS if ptype == "code" else GAME_CATEGORIES.get(category, [])
+    for key, name, default_price in source:
+        base_price = default_price / (base_rate / 100.0)
+        set_custom_price(ptype, category, key, base_price * (percent / 100.0))
+        count += 1
+    return count
+
 # ------------------------- Keyboards -------------------------
-def main_keyboard() -> ReplyKeyboardMarkup:
+def main_keyboard(lang: str = "en") -> ReplyKeyboardMarkup:
     return ReplyKeyboardMarkup(
         keyboard=[
-            [KeyboardButton(text="🚀 Game ID Recharge (Auto)")],
-            [KeyboardButton(text="🎮 PUBG UC CODE")],
-            [KeyboardButton(text="💰 My Balance"), KeyboardButton(text="📦 My Orders")],
-            [KeyboardButton(text="📊 My Transaction"), KeyboardButton(text="⚡ Manual Order")],
-            [KeyboardButton(text="☎️ Contact Support")],
+            [KeyboardButton(text=b("game_auto", lang))],
+            [KeyboardButton(text=b("pubg_code", lang))],
+            [KeyboardButton(text=b("balance", lang)), KeyboardButton(text=b("orders", lang))],
+            [KeyboardButton(text=b("transactions", lang)), KeyboardButton(text=b("manual", lang))],
+            [KeyboardButton(text=b("language", lang)), KeyboardButton(text=b("support", lang))],
         ],
         resize_keyboard=True,
         input_field_placeholder="Select an option...",
     )
+
+def language_kb() -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text=name, callback_data=f"lang:{code}")] for code, name in LANGUAGES.items()
+    ])
 
 def back_main_kb() -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="🔙 Back to Main Menu", callback_data="main")]])
@@ -348,15 +455,30 @@ def categories_kb() -> InlineKeyboardMarkup:
 
 def products_kb(category: str) -> InlineKeyboardMarkup:
     rows = []
-    for key, name, price in GAME_CATEGORIES[category]:
+    for key, name, price in priced_products(category, "auto"):
         rows.append([InlineKeyboardButton(text=f"{name} | {price:.2f}$", callback_data=f"buy:auto:{category}:{key}")])
     rows.append([InlineKeyboardButton(text="🔙 Back to Collection", callback_data="game_auto")])
     return InlineKeyboardMarkup(inline_keyboard=rows)
 
 def pubg_code_kb() -> InlineKeyboardMarkup:
     rows = []
-    for key, name, price in PUBG_UC_CODE_PRODUCTS:
+    for key, name, price in priced_products("PUBG UC CODE", "code"):
         rows.append([InlineKeyboardButton(text=f"{name} | {price:.2f} USDT", callback_data=f"buy:code:PUBG UC CODE:{key}")])
+    return InlineKeyboardMarkup(inline_keyboard=rows)
+
+def admin_reply_kb(user_id: int) -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="✉️ Reply to user", callback_data=f"admin_reply:{user_id}")]])
+
+def admin_price_categories_kb() -> InlineKeyboardMarkup:
+    rows = [[InlineKeyboardButton(text=cat, callback_data=f"admin_cat:auto:{cat}")] for cat in GAME_CATEGORIES]
+    rows.append([InlineKeyboardButton(text="PUBG UC CODE", callback_data="admin_cat:code:PUBG UC CODE")])
+    return InlineKeyboardMarkup(inline_keyboard=rows)
+
+def admin_products_kb(ptype: str, category: str) -> InlineKeyboardMarkup:
+    rows = []
+    for key, name, price in priced_products(category, ptype):
+        rows.append([InlineKeyboardButton(text=f"{name} | ${price:.2f}", callback_data=f"admin_price:{ptype}:{category}:{key}")])
+    rows.append([InlineKeyboardButton(text="📉 Change all by percent", callback_data=f"admin_rate:{ptype}:{category}")])
     return InlineKeyboardMarkup(inline_keyboard=rows)
 
 # ------------------------- Messages -------------------------
@@ -380,11 +502,12 @@ CONTACT_TEXT = """📞 We're here to help! If you have any questions or need ass
 ✨ Feel free to ask anything!"""
 
 async def send_welcome(message: Message) -> None:
+    lang = user_language(message.from_user.id)
     logo = Path(LOGO_PATH)
     if logo.exists():
-        await message.answer_photo(FSInputFile(str(logo)), caption=WELCOME_TEXT, reply_markup=main_keyboard())
+        await message.answer_photo(FSInputFile(str(logo)), caption=WELCOME_TEXT, reply_markup=main_keyboard(lang))
     else:
-        await message.answer(WELCOME_TEXT, reply_markup=main_keyboard())
+        await message.answer(WELCOME_TEXT, reply_markup=main_keyboard(lang))
 
 async def show_balance(message_or_query: Message | CallbackQuery) -> None:
     user = ensure_user(message_or_query)
@@ -401,10 +524,41 @@ Hello, {user['first_name'] or 'User'}! Here’s your current balance:
     else:
         await message_or_query.answer(text, reply_markup=balance_methods_kb())
 
+# ------------------------- Admin notifications -------------------------
+async def notify_admins(text: str, user_id: Optional[int] = None) -> None:
+    kb = admin_reply_kb(user_id) if user_id else None
+    for admin in ADMIN_IDS:
+        with suppress(Exception):
+            await bot.send_message(admin, text, reply_markup=kb)
+
+class AdminNotifyMiddleware(BaseMiddleware):
+    async def __call__(self, handler: Callable[[TelegramObject, Dict[str, Any]], Awaitable[Any]], event: TelegramObject, data: Dict[str, Any]) -> Any:
+        if isinstance(event, Message) and event.from_user and event.from_user.id not in ADMIN_IDS:
+            txt = event.text or event.caption or "[non-text message]"
+            if not txt.startswith("/"):
+                await notify_admins(
+                    f"""📩 <b>New user message</b>
+User ID: <code>{event.from_user.id}</code>
+Username: @{event.from_user.username or '-'}
+Name: {event.from_user.full_name}
+
+{txt}""",
+                    event.from_user.id,
+                )
+        return await handler(event, data)
+
+dp.message.middleware(AdminNotifyMiddleware())
+
 # ------------------------- Start and menu handlers -------------------------
 @dp.message(CommandStart())
 async def cmd_start(message: Message):
-    ensure_user(message)
+    user = ensure_user(message)
+    if message.from_user.id not in ADMIN_IDS:
+        await notify_admins(f"""🚪 <b>New bot start</b>
+User ID: <code>{message.from_user.id}</code>
+Username: @{message.from_user.username or '-'}
+Name: {message.from_user.full_name}
+Balance: ${float(user['balance']):.2f}""", message.from_user.id)
     await send_welcome(message)
 
 @dp.message(Command("menu"))
@@ -415,10 +569,10 @@ async def cmd_menu(message: Message):
 @dp.callback_query(F.data == "main")
 async def cb_main(query: CallbackQuery):
     ensure_user(query)
-    await query.message.answer(WELCOME_TEXT, reply_markup=main_keyboard())
+    await query.message.answer(WELCOME_TEXT, reply_markup=main_keyboard(user_language(message.from_user.id)))
     await query.answer()
 
-@dp.message(F.text == "🚀 Game ID Recharge (Auto)")
+@dp.message(F.text.in_(BUTTON_BY_KEY["game_auto"]))
 async def msg_game_auto(message: Message):
     ensure_user(message)
     await message.answer("🔘 Auto recharge is available for your product orders", reply_markup=categories_kb())
@@ -439,21 +593,21 @@ async def cb_category(query: CallbackQuery):
     await query.message.edit_text("✨ Here are some amazing products we have for you:", reply_markup=products_kb(category))
     await query.answer()
 
-@dp.message(F.text == "🎮 PUBG UC CODE")
+@dp.message(F.text.in_(BUTTON_BY_KEY["pubg_code"]))
 async def msg_pubg_code(message: Message):
     ensure_user(message)
     await message.answer("✨ Here are some amazing products we have for you:", reply_markup=pubg_code_kb())
 
-@dp.message(F.text == "💰 My Balance")
+@dp.message(F.text.in_(BUTTON_BY_KEY["balance"]))
 async def msg_balance(message: Message):
     await show_balance(message)
 
-@dp.message(F.text == "☎️ Contact Support")
+@dp.message(F.text.in_(BUTTON_BY_KEY["support"]))
 async def msg_support(message: Message):
     ensure_user(message)
     await message.answer(CONTACT_TEXT, reply_markup=support_kb())
 
-@dp.message(F.text == "📦 My Orders")
+@dp.message(F.text.in_(BUTTON_BY_KEY["orders"]))
 async def msg_orders(message: Message):
     ensure_user(message)
     with db() as con:
@@ -466,7 +620,7 @@ async def msg_orders(message: Message):
         text += f"✅ Order: #{r['id']}\n🎮 {r['product_name']} x{r['quantity']}\n💰 ${r['total_price']:.2f}\n📌 Status: {r['status']}\n\n"
     await message.answer(text)
 
-@dp.message(F.text == "📊 My Transaction")
+@dp.message(F.text.in_(BUTTON_BY_KEY["transactions"]))
 async def msg_transactions(message: Message):
     ensure_user(message)
     with db() as con:
@@ -479,7 +633,7 @@ async def msg_transactions(message: Message):
         text += f"💸 Transaction ID: #{r['id']}\n🔄 Type: {r['type']}\n💰 Amount: ${r['amount']:.2f}\n📌 Status: {r['status']}\n📝 {r['description']}\n\n"
     await message.answer(text)
 
-@dp.message(F.text == "⚡ Manual Order")
+@dp.message(F.text.in_(BUTTON_BY_KEY["manual"]))
 async def msg_manual(message: Message, state: FSMContext):
     ensure_user(message)
     await state.set_state(ManualOrderStates.waiting_text)
@@ -489,7 +643,7 @@ async def msg_manual(message: Message, state: FSMContext):
 async def manual_received(message: Message, state: FSMContext):
     if message.text == "/cancel":
         await state.clear()
-        await message.answer("❌ Cancelled.", reply_markup=main_keyboard())
+        await message.answer("❌ Cancelled.", reply_markup=main_keyboard(user_language(message.from_user.id)))
         return
     await state.clear()
     text = f"⚡ <b>New Manual Order</b>\n\nUser ID: {message.from_user.id}\nUsername: @{message.from_user.username or '-'}\n\n{message.text}"
@@ -497,6 +651,19 @@ async def manual_received(message: Message, state: FSMContext):
         with suppress(Exception):
             await bot.send_message(admin, text)
     await message.answer("✅ Your manual order has been sent to support.")
+
+@dp.message(F.text.in_(BUTTON_BY_KEY["language"]))
+async def msg_languages(message: Message):
+    ensure_user(message)
+    await message.answer("🌐 Choose your language:", reply_markup=language_kb())
+
+@dp.callback_query(F.data.startswith("lang:"))
+async def cb_language(query: CallbackQuery):
+    ensure_user(query)
+    lang = query.data.split(":", 1)[1]
+    set_user_language(query.from_user.id, lang)
+    await query.message.answer(f"✅ Language changed to {LANGUAGES.get(lang, lang)}", reply_markup=main_keyboard(lang))
+    await query.answer()
 
 # ------------------------- Deposit flow -------------------------
 @dp.callback_query(F.data.startswith("deposit:"))
@@ -513,7 +680,7 @@ async def deposit_amount(message: Message, state: FSMContext):
     ensure_user(message)
     if message.text and message.text.strip().lower() == "/cancel":
         await state.clear()
-        await message.answer("❌ Deposit cancelled.", reply_markup=main_keyboard())
+        await message.answer("❌ Deposit cancelled.", reply_markup=main_keyboard(user_language(message.from_user.id)))
         return
     try:
         amount = round(float((message.text or "").replace(",", ".")), 2)
@@ -584,9 +751,11 @@ async def cb_check_invoice(query: CallbackQuery):
 
 # ------------------------- Purchase flow -------------------------
 def find_product(category: str, key: str, ptype: str) -> Optional[Tuple[str, str, float]]:
-    if ptype == "code":
-        return next((p for p in PUBG_UC_CODE_PRODUCTS if p[0] == key), None)
-    return next((p for p in GAME_CATEGORIES.get(category, []) if p[0] == key), None)
+    product = _default_product(category, key, ptype)
+    if not product:
+        return None
+    pkey, name, default_price = product
+    return (pkey, name, get_custom_price(ptype, category, key) or default_price)
 
 @dp.callback_query(F.data.startswith("buy:"))
 async def cb_buy(query: CallbackQuery, state: FSMContext):
@@ -597,15 +766,27 @@ async def cb_buy(query: CallbackQuery, state: FSMContext):
         await query.answer("Product not found", show_alert=True)
         return
     await state.update_data(ptype=ptype, category=category, key=key)
-    await state.set_state(PurchaseStates.waiting_quantity)
-    await query.message.answer(f"🧾 Selected: {product[1]}\n💰 Unit Price: ${product[2]:.2f}\n\nPlease send the quantity you want.\n❌ Send /cancel to cancel.")
+    if ptype == "auto":
+        await state.set_state(PurchaseStates.waiting_game_id)
+        await query.message.answer(f"""🧾 Selected: {product[1]}
+💰 Unit Price: ${product[2]:.2f}
+
+Enter your Game ID number
+❌ Send /cancel to cancel.""")
+    else:
+        await state.set_state(PurchaseStates.waiting_quantity)
+        await query.message.answer(f"""🧾 Selected: {product[1]}
+💰 Unit Price: ${product[2]:.2f}
+
+Please send the quantity you want.
+❌ Send /cancel to cancel.""")
     await query.answer()
 
 @dp.message(PurchaseStates.waiting_quantity)
 async def purchase_quantity(message: Message, state: FSMContext):
     if message.text and message.text.strip().lower() == "/cancel":
         await state.clear()
-        await message.answer("❌ Cancelled.", reply_markup=main_keyboard())
+        await message.answer("❌ Cancelled.", reply_markup=main_keyboard(user_language(message.from_user.id)))
         return
     try:
         qty = int(message.text or "")
@@ -622,34 +803,34 @@ async def purchase_quantity(message: Message, state: FSMContext):
         await message.answer("❌ Product not found.")
         return
     total = round(product[2] * qty, 2)
-    # Minimum appears only at purchase attempt.
+    balance = float(get_user(message.from_user.id)["balance"])
+    if balance < total:
+        await state.clear()
+        await message.answer(f"""❌ Insufficient balance.
+Required: ${total:.2f}
+Your balance: ${balance:.2f}""")
+        return
     if total < MIN_ORDER_AMOUNT:
         await state.clear()
         await message.answer(f"Minimum order amount is ${MIN_ORDER_AMOUNT:.0f}.")
         return
-    balance = float(get_user(message.from_user.id)["balance"])
-    if balance < total:
-        await state.clear()
-        await message.answer(f"❌ Insufficient balance.\nRequired: ${total:.2f}\nYour balance: ${balance:.2f}")
-        return
     await state.update_data(quantity=qty, total=total)
-    if ptype == "auto":
-        await state.set_state(PurchaseStates.waiting_game_id)
-        await message.answer("🆔 Please send your Game ID / Player ID.\n❌ Send /cancel to cancel.")
-    else:
-        await complete_order(message, state, game_id="")
+    await complete_order(message, state, game_id=data.get("game_id", ""))
 
 @dp.message(PurchaseStates.waiting_game_id)
 async def purchase_game_id(message: Message, state: FSMContext):
     if message.text and message.text.strip().lower() == "/cancel":
         await state.clear()
-        await message.answer("❌ Cancelled.", reply_markup=main_keyboard())
+        await message.answer("❌ Cancelled.", reply_markup=main_keyboard(user_language(message.from_user.id)))
         return
     game_id = (message.text or "").strip()
     if len(game_id) < 3:
         await message.answer("❌ Please send a valid Game ID.")
         return
-    await complete_order(message, state, game_id=game_id)
+    await state.update_data(game_id=game_id)
+    await state.set_state(PurchaseStates.waiting_quantity)
+    await message.answer("""Please send the quantity you want.
+❌ Send /cancel to cancel.""")
 
 async def complete_order(message: Message, state: FSMContext, game_id: str):
     data = await state.get_data()
@@ -694,7 +875,7 @@ async def complete_order(message: Message, state: FSMContext, game_id: str):
         text += f"\n🆔 Game ID: <code>{game_id}</code>"
     if ptype == "code":
         text += f"\n\n🎟 Code:\n<code>{code_text}</code>"
-    await message.answer(text, reply_markup=main_keyboard())
+    await message.answer(text, reply_markup=main_keyboard(user_language(message.from_user.id)))
     for admin in ADMIN_IDS:
         with suppress(Exception):
             await bot.send_message(admin, f"🆕 New Order #{order_id}\nUser: {message.from_user.id}\nProduct: {product[1]} x{qty}\nTotal: ${total:.2f}\nStatus: {status}")
@@ -837,6 +1018,150 @@ async def invoice_watcher() -> None:
 def admin_only(message: Message) -> bool:
     return message.from_user and message.from_user.id in ADMIN_IDS
 
+@dp.callback_query(F.data.startswith("admin_reply:"))
+async def cb_admin_reply(query: CallbackQuery, state: FSMContext):
+    if query.from_user.id not in ADMIN_IDS:
+        return
+    uid = int(query.data.split(":", 1)[1])
+    await state.update_data(reply_user_id=uid)
+    await state.set_state(AdminReplyStates.waiting_text)
+    await query.message.answer(f"✉️ Send your reply to user {uid}. Send /cancel to cancel.")
+    await query.answer()
+
+@dp.message(AdminReplyStates.waiting_text)
+async def admin_reply_text(message: Message, state: FSMContext):
+    if not admin_only(message):
+        return
+    if message.text and message.text.strip().lower() == "/cancel":
+        await state.clear()
+        await message.answer("❌ Cancelled.")
+        return
+    data = await state.get_data()
+    uid = int(data.get("reply_user_id"))
+    await bot.send_message(uid, f"""📩 <b>Support Reply</b>
+
+{message.text or ''}""")
+    await state.clear()
+    await message.answer("✅ Reply sent.")
+
+@dp.message(Command("adminprices"))
+async def admin_prices(message: Message):
+    if not admin_only(message):
+        return
+    await message.answer("⚙️ Choose a category to edit prices:", reply_markup=admin_price_categories_kb())
+
+@dp.callback_query(F.data.startswith("admin_cat:"))
+async def cb_admin_price_category(query: CallbackQuery):
+    if query.from_user.id not in ADMIN_IDS:
+        return
+    _, ptype, category = query.data.split(":", 2)
+    await query.message.answer(f"⚙️ Edit prices for {category}:", reply_markup=admin_products_kb(ptype, category))
+    await query.answer()
+
+@dp.callback_query(F.data.startswith("admin_rate:"))
+async def cb_admin_rate(query: CallbackQuery, state: FSMContext):
+    if query.from_user.id not in ADMIN_IDS:
+        return
+    _, ptype, category = query.data.split(":", 2)
+    await state.update_data(price_ptype=ptype, price_category=category)
+    await state.set_state(AdminPriceStates.waiting_percent)
+    await query.message.answer(f"""Send new percent for all products in:
+{category}
+
+Example: 75""")
+    await query.answer()
+
+@dp.message(AdminPriceStates.waiting_percent)
+async def admin_rate_text(message: Message, state: FSMContext):
+    if not admin_only(message):
+        return
+    try:
+        percent = float((message.text or "").replace("%", "").replace(",", "."))
+        if percent <= 0 or percent > 1000:
+            raise ValueError
+    except ValueError:
+        await message.answer("❌ Send valid percent. Example: 75")
+        return
+    data = await state.get_data()
+    count = apply_category_percent(data["price_ptype"], data["price_category"], percent)
+    await state.clear()
+    await message.answer(f"✅ Updated {count} products to {percent:g}%.", reply_markup=admin_products_kb(data["price_ptype"], data["price_category"]))
+
+@dp.callback_query(F.data.startswith("admin_price:"))
+async def cb_admin_price(query: CallbackQuery, state: FSMContext):
+    if query.from_user.id not in ADMIN_IDS:
+        return
+    _, ptype, category, key = query.data.split(":", 3)
+    await state.update_data(price_ptype=ptype, price_category=category, price_key=key)
+    await state.set_state(AdminPriceStates.waiting_price)
+    await query.message.answer("Send new price in USD. Example: 3.75")
+    await query.answer()
+
+@dp.message(AdminPriceStates.waiting_price)
+async def admin_price_text(message: Message, state: FSMContext):
+    if not admin_only(message):
+        return
+    try:
+        price = float((message.text or "").replace(",", "."))
+        if price < 0:
+            raise ValueError
+    except ValueError:
+        await message.answer("❌ Send valid price. Example: 3.75")
+        return
+    data = await state.get_data()
+    set_custom_price(data["price_ptype"], data["price_category"], data["price_key"], price)
+    await state.clear()
+    await message.answer("✅ Product price updated.", reply_markup=admin_products_kb(data["price_ptype"], data["price_category"]))
+
+@dp.message(Command("setpercent"))
+async def admin_set_percent_cmd(message: Message):
+    if not admin_only(message):
+        return
+    import shlex
+    try:
+        parts = shlex.split(message.text or "")
+    except ValueError:
+        parts = (message.text or "").split()
+    if len(parts) < 3:
+        await message.answer('Usage: /setpercent "PUBG MOBILE ID AUTO" 75')
+        return
+    try:
+        percent = float(parts[-1].replace("%", ""))
+    except ValueError:
+        await message.answer("Invalid percent.")
+        return
+    category = " ".join(parts[1:-1])
+    ptype = "code" if category == "PUBG UC CODE" else "auto"
+    if ptype == "auto" and category not in GAME_CATEGORIES:
+        await message.answer("Category not found.")
+        return
+    count = apply_category_percent(ptype, category, percent)
+    await message.answer(f"✅ Updated {category}: {count} products to {percent:g}%.")
+
+@dp.message(Command("setprice"))
+async def admin_set_price_cmd(message: Message):
+    if not admin_only(message):
+        return
+    import shlex
+    try:
+        parts = shlex.split(message.text or "")
+    except ValueError:
+        parts = (message.text or "").split()
+    if len(parts) != 5:
+        await message.answer('Usage: /setprice auto "PUBG MOBILE ID AUTO" 60 0.75')
+        return
+    _, ptype, category, key, price_s = parts
+    try:
+        price = float(price_s)
+    except ValueError:
+        await message.answer("Invalid price.")
+        return
+    if not _default_product(category, key, ptype):
+        await message.answer("Product not found.")
+        return
+    set_custom_price(ptype, category, key, price)
+    await message.answer(f"✅ Price updated: {category} / {key} = ${price:.2f}")
+
 @dp.message(Command("addbalance"))
 async def admin_add_balance(message: Message):
     if not admin_only(message):
@@ -921,13 +1246,13 @@ async def admin_broadcast(message: Message):
 @dp.message(Command("cancel"))
 async def cmd_cancel(message: Message, state: FSMContext):
     await state.clear()
-    await message.answer("❌ Cancelled.", reply_markup=main_keyboard())
+    await message.answer("❌ Cancelled.", reply_markup=main_keyboard(user_language(message.from_user.id)))
 
 # ------------------------- Fallback -------------------------
 @dp.message()
 async def fallback(message: Message):
     ensure_user(message)
-    await message.answer("Please select one of the options below:", reply_markup=main_keyboard())
+    await message.answer("Please select one of the options below:", reply_markup=main_keyboard(user_language(message.from_user.id)))
 
 async def main():
     init_db()
