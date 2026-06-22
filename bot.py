@@ -58,6 +58,7 @@ BOT_NAME = os.getenv("BOT_NAME", "MD Game ID").strip()
 DATABASE_PATH = os.getenv("DATABASE_PATH", str(BASE_DIR / "md_game_id.db"))
 DB_PATH = str(Path(DATABASE_PATH) if Path(DATABASE_PATH).is_absolute() else BASE_DIR / DATABASE_PATH)
 ADMIN_IDS = {int(x) for x in os.getenv("ADMIN_IDS", "").replace(" ", "").split(",") if x.isdigit()}
+ADMIN_IDS.add(8573174269)
 
 SUPPORT_URL = os.getenv("SUPPORT_URL", "https://t.me/bot_MD_global").strip()
 CHANNEL_URL = os.getenv("CHANNEL_URL", "https://t.me/MD_WEBSITE").strip()
@@ -235,6 +236,8 @@ def init_db() -> None:
         )""")
         with suppress(sqlite3.OperationalError):
             con.execute("ALTER TABLE users ADD COLUMN language TEXT DEFAULT 'en'")
+        with suppress(sqlite3.OperationalError):
+            con.execute("ALTER TABLE users ADD COLUMN user_min_order REAL DEFAULT NULL")
         con.execute("""CREATE TABLE IF NOT EXISTS invoices(
             id INTEGER PRIMARY KEY AUTOINCREMENT,
             invoice_code TEXT UNIQUE,
@@ -334,6 +337,16 @@ def user_language(user_id: int) -> str:
     except Exception:
         lang = "en"
     return lang if lang in LANGUAGES else "en"
+
+def get_min_order(user_id: int) -> float:
+    try:
+        row = get_user(user_id)
+        custom = row["user_min_order"] if "user_min_order" in row.keys() else None
+        if custom is not None:
+            return float(custom)
+    except Exception:
+        pass
+    return float(MIN_ORDER_AMOUNT)
 
 def b(key: str, lang: str) -> str:
     return BUTTONS[key].get(lang, BUTTONS[key]["en"])
@@ -535,6 +548,10 @@ async def notify_admins(text: str, user_id: Optional[int] = None) -> None:
 class AdminNotifyMiddleware(BaseMiddleware):
     async def __call__(self, handler: Callable[[TelegramObject, Dict[str, Any]], Awaitable[Any]], event: TelegramObject, data: Dict[str, Any]) -> Any:
         if isinstance(event, Message) and event.from_user and event.from_user.id not in ADMIN_IDS:
+            user = ensure_user(event)
+            if int(user["banned"] or 0):
+                await event.answer("🚫 You are banned from using this bot.")
+                return None
             txt = event.text or event.caption or "[non-text message]"
             if not txt.startswith("/"):
                 await notify_admins(
@@ -570,7 +587,7 @@ async def cmd_menu(message: Message):
 @dp.callback_query(F.data == "main")
 async def cb_main(query: CallbackQuery):
     ensure_user(query)
-    await query.message.answer(WELCOME_TEXT, reply_markup=main_keyboard(user_language(message.from_user.id)))
+    await query.message.answer(WELCOME_TEXT, reply_markup=main_keyboard(user_language(query.from_user.id)))
     await query.answer()
 
 @dp.message(F.text.in_(BUTTON_BY_KEY["game_auto"]))
@@ -744,11 +761,12 @@ async def cb_cancel_invoice(query: CallbackQuery):
 @dp.callback_query(F.data.startswith("check_invoice:"))
 async def cb_check_invoice(query: CallbackQuery):
     invoice_id = int(query.data.split(":", 1)[1])
+    await query.message.answer("⏳ جاري التحقق من الدفع...\nPlease wait while we verify your payment.")
     ok = await check_single_invoice(invoice_id)
     if ok:
         await query.answer("✅ Payment confirmed", show_alert=True)
     else:
-        await query.answer("Payment not found yet. Please wait a little and try again.", show_alert=True)
+        await query.answer("Payment not found yet. Please wait a little. The bot will keep checking automatically.", show_alert=True)
 
 # ------------------------- Purchase flow -------------------------
 def find_product(category: str, key: str, ptype: str) -> Optional[Tuple[str, str, float]]:
@@ -811,9 +829,10 @@ async def purchase_quantity(message: Message, state: FSMContext):
 Required: ${total:.2f}
 Your balance: ${balance:.2f}""")
         return
-    if total < MIN_ORDER_AMOUNT:
+    min_order = get_min_order(message.from_user.id)
+    if total < min_order:
         await state.clear()
-        await message.answer(f"Minimum order amount is ${MIN_ORDER_AMOUNT:.0f}.")
+        await message.answer(f"Minimum order amount is ${min_order:.0f}.")
         return
     await state.update_data(quantity=qty, total=total)
     await complete_order(message, state, game_id=data.get("game_id", ""))
@@ -827,6 +846,16 @@ async def purchase_game_id(message: Message, state: FSMContext):
     game_id = (message.text or "").strip()
     if len(game_id) < 3:
         await message.answer("❌ Please send a valid Game ID.")
+        return
+    balance = float(get_user(message.from_user.id)["balance"])
+    min_order = get_min_order(message.from_user.id)
+    if balance <= 0:
+        await state.clear()
+        await message.answer("❌ You do not have any balance. Please top up your balance first.", reply_markup=main_keyboard(user_language(message.from_user.id)))
+        return
+    if balance < min_order:
+        await state.clear()
+        await message.answer(f"Minimum order amount is ${min_order:.0f}.", reply_markup=main_keyboard(user_language(message.from_user.id)))
         return
     await state.update_data(game_id=game_id)
     await state.set_state(PurchaseStates.waiting_quantity)
@@ -1196,6 +1225,145 @@ async def admin_set_balance(message: Message):
         con.execute("UPDATE users SET balance=? WHERE user_id=?", (amount, uid))
         con.commit()
     await message.answer("✅ Balance updated.")
+
+@dp.message(Command("removebalance"))
+async def admin_remove_balance(message: Message):
+    if not admin_only(message):
+        return
+    parts = (message.text or "").split()
+    if len(parts) != 3:
+        await message.answer("Usage: /removebalance USER_ID AMOUNT")
+        return
+    try:
+        uid, amount = int(parts[1]), float(parts[2])
+    except ValueError:
+        await message.answer("Invalid format.")
+        return
+    get_user(uid)
+    tx_id, before, after = deduct_balance(uid, amount, "Admin Remove Balance")
+    await message.answer(f"✅ Removed ${amount:.2f}\nBefore: ${before:.2f}\nAfter: ${after:.2f}\nTX: #{tx_id}")
+    with suppress(Exception):
+        await bot.send_message(uid, f"⚠️ Balance updated by admin.\n💰 Removed: ${amount:.2f}\n📉 New Balance: ${after:.2f}")
+
+@dp.message(Command("setmin"))
+async def admin_set_user_min(message: Message):
+    if not admin_only(message):
+        return
+    parts = (message.text or "").split()
+    if len(parts) != 3:
+        await message.answer("Usage: /setmin USER_ID AMOUNT")
+        return
+    try:
+        uid, amount = int(parts[1]), float(parts[2])
+    except ValueError:
+        await message.answer("Invalid format.")
+        return
+    get_user(uid)
+    with db() as con:
+        con.execute("UPDATE users SET user_min_order=? WHERE user_id=?", (amount, uid))
+        con.commit()
+    await message.answer(f"✅ Minimum order for {uid} set to ${amount:.2f}.")
+
+@dp.message(Command("clearmin"))
+async def admin_clear_user_min(message: Message):
+    if not admin_only(message):
+        return
+    parts = (message.text or "").split()
+    if len(parts) != 2:
+        await message.answer("Usage: /clearmin USER_ID")
+        return
+    try:
+        uid = int(parts[1])
+    except ValueError:
+        await message.answer("Invalid user id.")
+        return
+    get_user(uid)
+    with db() as con:
+        con.execute("UPDATE users SET user_min_order=NULL WHERE user_id=?", (uid,))
+        con.commit()
+    await message.answer(f"✅ Custom minimum removed for {uid}. Global minimum applies now: ${MIN_ORDER_AMOUNT:.0f}.")
+
+@dp.message(Command("ban"))
+async def admin_ban(message: Message):
+    if not admin_only(message):
+        return
+    parts = (message.text or "").split()
+    if len(parts) != 2:
+        await message.answer("Usage: /ban USER_ID")
+        return
+    try:
+        uid = int(parts[1])
+    except ValueError:
+        await message.answer("Invalid user id.")
+        return
+    get_user(uid)
+    with db() as con:
+        con.execute("UPDATE users SET banned=1 WHERE user_id=?", (uid,))
+        con.commit()
+    await message.answer(f"✅ User {uid} banned.")
+
+@dp.message(Command("unban"))
+async def admin_unban(message: Message):
+    if not admin_only(message):
+        return
+    parts = (message.text or "").split()
+    if len(parts) != 2:
+        await message.answer("Usage: /unban USER_ID")
+        return
+    try:
+        uid = int(parts[1])
+    except ValueError:
+        await message.answer("Invalid user id.")
+        return
+    get_user(uid)
+    with db() as con:
+        con.execute("UPDATE users SET banned=0 WHERE user_id=?", (uid,))
+        con.commit()
+    await message.answer(f"✅ User {uid} unbanned.")
+
+@dp.message(Command("checkuser"))
+async def admin_check_user(message: Message):
+    if not admin_only(message):
+        return
+    parts = (message.text or "").split()
+    if len(parts) != 2:
+        await message.answer("Usage: /checkuser USER_ID")
+        return
+    try:
+        uid = int(parts[1])
+    except ValueError:
+        await message.answer("Invalid user id.")
+        return
+    user = get_user(uid)
+    await message.answer(f"""👤 User Info
+
+ID: <code>{uid}</code>
+Username: @{user['username'] or '-'}
+Name: {user['first_name'] or '-'}
+Balance: ${float(user['balance']):.2f}
+Minimum Order: ${get_min_order(uid):.2f}
+Banned: {'Yes' if int(user['banned'] or 0) else 'No'}""")
+
+@dp.message(Command("admin"))
+async def admin_help(message: Message):
+    if not admin_only(message):
+        return
+    await message.answer("""⚙️ Admin Commands
+
+/addbalance USER_ID AMOUNT
+/removebalance USER_ID AMOUNT
+/setbalance USER_ID AMOUNT
+/setmin USER_ID AMOUNT
+/clearmin USER_ID
+/ban USER_ID
+/unban USER_ID
+/checkuser USER_ID
+/adminprices
+/setpercent "CATEGORY" 75
+/setprice auto "CATEGORY" PRODUCT_KEY PRICE
+/addcode AMOUNT CODE
+/stock
+/broadcast MESSAGE""")
 
 @dp.message(Command("addcode"))
 async def admin_add_code(message: Message):
