@@ -34,6 +34,7 @@ import aiohttp
 from aiogram import BaseMiddleware, Bot, Dispatcher, F
 from aiogram.client.default import DefaultBotProperties
 from aiogram.enums import ParseMode
+from aiogram.dispatcher.event.bases import SkipHandler
 from aiogram.filters import Command, CommandStart
 from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import State, StatesGroup
@@ -714,6 +715,8 @@ async def cb_deposit_network(query: CallbackQuery, state: FSMContext):
 
 @dp.message(DepositStates.waiting_amount)
 async def deposit_amount(message: Message, state: FSMContext):
+    if is_admin_command_message(message):
+        raise SkipHandler()
     ensure_user(message)
     if message.text and message.text.strip().lower() == "/cancel":
         await state.clear()
@@ -822,6 +825,8 @@ Please send the quantity you want.
 
 @dp.message(PurchaseStates.waiting_quantity)
 async def purchase_quantity(message: Message, state: FSMContext):
+    if is_admin_command_message(message):
+        raise SkipHandler()
     if message.text and message.text.strip().lower() == "/cancel":
         await state.clear()
         await message.answer("❌ Cancelled.", reply_markup=main_keyboard(user_language(message.from_user.id)))
@@ -858,6 +863,8 @@ Your balance: ${balance:.2f}""")
 
 @dp.message(PurchaseStates.waiting_game_id)
 async def purchase_game_id(message: Message, state: FSMContext):
+    if is_admin_command_message(message):
+        raise SkipHandler()
     if message.text and message.text.strip().lower() == "/cancel":
         await state.clear()
         await message.answer("❌ Cancelled.", reply_markup=main_keyboard(user_language(message.from_user.id)))
@@ -1152,6 +1159,15 @@ async def invoice_watcher() -> None:
 def admin_only(message: Message) -> bool:
     return message.from_user and message.from_user.id in ADMIN_IDS
 
+def is_admin_command_message(message: Message) -> bool:
+    """Allow admin commands to bypass FSM state handlers."""
+    return bool(
+        message.from_user
+        and message.from_user.id in ADMIN_IDS
+        and message.text
+        and message.text.strip().startswith("/")
+    )
+
 @dp.callback_query(F.data.startswith("admin_reply:"))
 async def cb_admin_reply(query: CallbackQuery, state: FSMContext):
     if query.from_user.id not in ADMIN_IDS:
@@ -1164,6 +1180,8 @@ async def cb_admin_reply(query: CallbackQuery, state: FSMContext):
 
 @dp.message(AdminReplyStates.waiting_text)
 async def admin_reply_text(message: Message, state: FSMContext):
+    if is_admin_command_message(message):
+        raise SkipHandler()
     if not admin_only(message):
         return
     if message.text and message.text.strip().lower() == "/cancel":
@@ -1207,6 +1225,8 @@ Example: 75""")
 
 @dp.message(AdminPriceStates.waiting_percent)
 async def admin_rate_text(message: Message, state: FSMContext):
+    if is_admin_command_message(message):
+        raise SkipHandler()
     if not admin_only(message):
         return
     try:
@@ -1233,6 +1253,8 @@ async def cb_admin_price(query: CallbackQuery, state: FSMContext):
 
 @dp.message(AdminPriceStates.waiting_price)
 async def admin_price_text(message: Message, state: FSMContext):
+    if is_admin_command_message(message):
+        raise SkipHandler()
     if not admin_only(message):
         return
     try:
@@ -1296,7 +1318,7 @@ async def admin_set_price_cmd(message: Message):
     set_custom_price(ptype, category, key, price)
     await message.answer(f"✅ Price updated: {category} / {key} = ${price:.2f}")
 
-@dp.message(Command("addbalance"))
+@dp.message(Command("addbalance", "add"))
 async def admin_add_balance(message: Message):
     if not admin_only(message):
         return
@@ -1323,14 +1345,24 @@ async def admin_set_balance(message: Message):
     if len(parts) != 3:
         await message.answer("Usage: /setbalance USER_ID AMOUNT")
         return
-    uid, amount = int(parts[1]), float(parts[2])
+    try:
+        uid, amount = int(parts[1]), float(parts[2])
+    except ValueError:
+        await message.answer("Invalid format.")
+        return
     get_user(uid)
     with db() as con:
+        before_row = con.execute("SELECT balance FROM users WHERE user_id=?", (uid,)).fetchone()
+        before = float(before_row["balance"] if before_row else 0)
         con.execute("UPDATE users SET balance=? WHERE user_id=?", (amount, uid))
+        con.execute(
+            "INSERT INTO transactions(user_id, tx_type, amount, balance_before, balance_after, status, description, created_at) VALUES(?,?,?,?,?,?,?,?)",
+            (uid, "Set Balance", amount, before, amount, "Success", "Admin Set Balance", now_iso()),
+        )
         con.commit()
-    await message.answer("✅ Balance updated.")
+    await message.answer(f"✅ Balance set for {uid}\nBefore: ${before:.2f}\nAfter: ${amount:.2f}")
 
-@dp.message(Command("removebalance"))
+@dp.message(Command("removebalance", "remove", "deduct"))
 async def admin_remove_balance(message: Message):
     if not admin_only(message):
         return
@@ -1425,7 +1457,7 @@ async def admin_unban(message: Message):
         con.commit()
     await message.answer(f"✅ User {uid} unbanned.")
 
-@dp.message(Command("checkuser"))
+@dp.message(Command("checkuser", "check"))
 async def admin_check_user(message: Message):
     if not admin_only(message):
         return
@@ -1493,14 +1525,14 @@ async def admin_help(message: Message):
         return
     await message.answer("""⚙️ Admin Commands
 
-/addbalance USER_ID AMOUNT
-/removebalance USER_ID AMOUNT
+/addbalance USER_ID AMOUNT  or  /add USER_ID AMOUNT
+/removebalance USER_ID AMOUNT  or  /remove USER_ID AMOUNT
 /setbalance USER_ID AMOUNT
 /setmin USER_ID AMOUNT
 /clearmin USER_ID
 /ban USER_ID
 /unban USER_ID
-/checkuser USER_ID
+/checkuser USER_ID  or  /check USER_ID
 /adminprices
 /setpercent "CATEGORY" 75
 /setprice auto "CATEGORY" PRODUCT_KEY PRICE
