@@ -306,6 +306,11 @@ def init_db() -> None:
             updated_at TEXT NOT NULL,
             PRIMARY KEY(ptype, category, product_key)
         )""")
+        # Important fix: old versions stored empty string in the UNIQUE txid column.
+        # SQLite allows many NULL values in UNIQUE columns, but only one empty string.
+        # Without this migration, /addbalance may work once and then fail for the next user.
+        with suppress(Exception):
+            con.execute("UPDATE transactions SET txid=NULL WHERE txid='' OR txid='None'")
         con.commit()
 
 def now_iso() -> str:
@@ -362,7 +367,7 @@ def set_user_language(user_id: int, lang: str) -> None:
         con.execute("UPDATE users SET language=? WHERE user_id=?", (lang, user_id))
         con.commit()
 
-def add_balance(user_id: int, amount: float, description: str, txid: str = "") -> Tuple[int, float, float]:
+def add_balance(user_id: int, amount: float, description: str, txid: Optional[str] = None) -> Tuple[int, float, float]:
     with db() as con:
         row = con.execute("SELECT balance FROM users WHERE user_id=?", (user_id,)).fetchone()
         before = float(row["balance"] if row else 0.0)
@@ -372,7 +377,7 @@ def add_balance(user_id: int, amount: float, description: str, txid: str = "") -
         cur = con.execute(
             """INSERT INTO transactions(tx_code, user_id, type, amount, balance_before, balance_after, status, description, txid, created_at)
                VALUES(?,?,?,?,?,?,?,?,?,?)""",
-            (tx_code, user_id, "Add Balance", amount, before, after, "Success", description, txid, now_iso()),
+            (tx_code, user_id, "Add Balance", amount, before, after, "Success", description, (txid or None), now_iso()),
         )
         con.commit()
         return cur.lastrowid, before, after
@@ -385,7 +390,7 @@ def deduct_balance(user_id: int, amount: float, description: str) -> Tuple[int, 
         cur = con.execute(
             """INSERT INTO transactions(tx_code, user_id, type, amount, balance_before, balance_after, status, description, txid, created_at)
                VALUES(?,?,?,?,?,?,?,?,?,?)""",
-            (gen_code("#"), user_id, "Purchase", -amount, before, after, "Success", description, "", now_iso()),
+            (gen_code("#"), user_id, "Purchase", -amount, before, after, "Success", description, None, now_iso()),
         )
         con.commit()
         return cur.lastrowid, before, after
