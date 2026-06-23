@@ -783,12 +783,40 @@ async def cb_cancel_invoice(query: CallbackQuery):
 @dp.callback_query(F.data.startswith("check_invoice:"))
 async def cb_check_invoice(query: CallbackQuery):
     invoice_id = int(query.data.split(":", 1)[1])
+
+    with db() as con:
+        inv = con.execute(
+            "SELECT * FROM invoices WHERE id=? AND user_id=?",
+            (invoice_id, query.from_user.id),
+        ).fetchone()
+        if not inv:
+            await query.answer("Invoice not found", show_alert=True)
+            return
+        if inv["status"] == "paid":
+            await query.answer("Invoice already paid", show_alert=True)
+            return
+        # Manual verification mode: keep the invoice pending and notify admins only.
+        con.execute("UPDATE invoices SET status='manual_pending' WHERE id=? AND status='waiting'", (invoice_id,))
+        con.commit()
+
     await query.message.answer("⏳ جاري التحقق من الدفع...\nPlease wait while we verify your payment.")
-    ok = await check_single_invoice(invoice_id)
-    if ok:
-        await query.answer("✅ Payment confirmed", show_alert=True)
-    else:
-        await query.answer("Payment not found yet. Please wait a little. The bot will keep checking automatically.", show_alert=True)
+    await query.answer("Payment submitted. Support will verify it manually.", show_alert=True)
+
+    admin_text = f"""💰 <b>Manual Payment Check Requested</b>
+
+Invoice ID: #{invoice_id}
+User ID: <code>{query.from_user.id}</code>
+Username: @{query.from_user.username or '-'}
+Network: {inv['network']}
+Amount: ${float(inv['amount']):.2f}
+Address: <code>{inv['address']}</code>
+
+Use:
+/addbalance {query.from_user.id} {float(inv['amount']):.2f}
+"""
+    for admin in ADMIN_IDS:
+        with suppress(Exception):
+            await bot.send_message(admin, admin_text, reply_markup=admin_reply_kb(query.from_user.id))
 
 # ------------------------- Purchase flow -------------------------
 def find_product(category: str, key: str, ptype: str) -> Optional[Tuple[str, str, float]]:
@@ -1356,7 +1384,7 @@ async def admin_set_balance(message: Message):
         before = float(before_row["balance"] if before_row else 0)
         con.execute("UPDATE users SET balance=? WHERE user_id=?", (amount, uid))
         con.execute(
-            "INSERT INTO transactions(user_id, tx_type, amount, balance_before, balance_after, status, description, created_at) VALUES(?,?,?,?,?,?,?,?)",
+            "INSERT INTO transactions(user_id, type, amount, balance_before, balance_after, status, description, created_at) VALUES(?,?,?,?,?,?,?,?)",
             (uid, "Set Balance", amount, before, amount, "Success", "Admin Set Balance", now_iso()),
         )
         con.commit()
@@ -1602,7 +1630,7 @@ async def fallback(message: Message):
 
 async def main():
     init_db()
-    asyncio.create_task(invoice_watcher())
+    # Manual payment mode: automatic Bybit invoice watcher is disabled.
     print("MD Game ID bot started")
     await dp.start_polling(bot)
 
