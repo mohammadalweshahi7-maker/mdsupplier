@@ -553,6 +553,44 @@ async def notify_admins(text: str, user_id: Optional[int] = None) -> None:
         with suppress(Exception):
             await bot.send_message(admin, text, reply_markup=kb)
 
+# ------------------------- Closed old bot redirect -------------------------
+CLOSED_BOT_TEXT = (
+    "🔒 تم قفل هذا البوت ونقل الخدمة إلى البوت الجديد: @TopupPrimeBot\n\n"
+    "🔒 This bot has been closed and moved to our new bot: @TopupPrimeBot"
+)
+
+class ClosedOldBotMiddleware(BaseMiddleware):
+    async def __call__(self, handler: Callable[[TelegramObject, Dict[str, Any]], Awaitable[Any]], event: TelegramObject, data: Dict[str, Any]) -> Any:
+        user = getattr(event, "from_user", None)
+        if not user:
+            return await handler(event, data)
+
+        # Keep admin commands working so the owner can still manage or test the old bot.
+        if user.id in ADMIN_IDS:
+            return await handler(event, data)
+
+        with suppress(Exception):
+            ensure_user(event)
+
+        lang = user_language(user.id)
+
+        if isinstance(event, Message):
+            await event.answer(CLOSED_BOT_TEXT, reply_markup=main_keyboard(lang))
+            return None
+
+        if isinstance(event, CallbackQuery):
+            with suppress(Exception):
+                await event.answer("Bot moved: @TopupPrimeBot", show_alert=False)
+            if event.message:
+                await event.message.answer(CLOSED_BOT_TEXT, reply_markup=main_keyboard(lang))
+            return None
+
+        return await handler(event, data)
+
+dp.message.middleware(ClosedOldBotMiddleware())
+dp.callback_query.middleware(ClosedOldBotMiddleware())
+
+
 class AdminNotifyMiddleware(BaseMiddleware):
     async def __call__(self, handler: Callable[[TelegramObject, Dict[str, Any]], Awaitable[Any]], event: TelegramObject, data: Dict[str, Any]) -> Any:
         if isinstance(event, Message) and event.from_user and event.from_user.id not in ADMIN_IDS:
